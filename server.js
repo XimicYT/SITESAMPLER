@@ -9,6 +9,7 @@ app.use(express.static(path.join(__dirname)));
 let isCrawling = false;
 let successfulSites = 0;
 let crawlLogs = [];
+let scrapedUrlsList = []; // NEW: The Captain's Log
 let finalDictionary = null;
 
 const seedUrls = [
@@ -19,19 +20,27 @@ const seedUrls = [
     "https://en.wikipedia.org/wiki/Main_Page"
 ];
 
-// List of file extensions we DO NOT want to scrape
 const badExtensions = /\.(js|css|pdf|png|jpe?g|gif|svg|ico|xml|json|zip|mp3|mp4)$/i;
+
+// NEW: Root Domain Extractor
+function getBaseDomain(hostname) {
+    const parts = hostname.split('.');
+    // Handle things like .co.uk or .com.au
+    if (parts.length > 2 && (parts[parts.length - 2] === 'co' || parts[parts.length - 2] === 'com' || parts[parts.length - 2] === 'org')) {
+        return parts.slice(-3).join('.'); 
+    }
+    return parts.slice(-2).join('.'); // Turns en.wikipedia.org into wikipedia.org
+}
 
 async function startSpider(targetCount = 150) {
     isCrawling = true;
     successfulSites = 0;
     crawlLogs = ["Initializing spider..."];
+    scrapedUrlsList = []; // Clear previous logs
     finalDictionary = null;
 
     const queue = [...seedUrls];
-    const visitedDomains = new Set();
-    
-    // SAFEGUARD 1: The Global Memory Bank (Prevents infinite A -> B -> A loops)
+    const visitedRootDomains = new Set(); // UPGRADED: Tracks root domains, not hostnames
     const visitedUrls = new Set([...seedUrls]); 
     const tagData = {};
 
@@ -42,10 +51,11 @@ async function startSpider(targetCount = 150) {
         try { urlObj = new URL(currentUrl); } 
         catch (e) { continue; }
 
-        const currentDomain = urlObj.hostname;
+        // Extract the root domain to avoid subdomain traps
+        const rootDomain = getBaseDomain(urlObj.hostname);
         
-        if (visitedDomains.has(currentDomain)) continue;
-        visitedDomains.add(currentDomain);
+        if (visitedRootDomains.has(rootDomain)) continue;
+        visitedRootDomains.add(rootDomain);
 
         try {
             const controller = new AbortController();
@@ -54,15 +64,20 @@ async function startSpider(targetCount = 150) {
             const response = await fetch(currentUrl, { signal: controller.signal });
             clearTimeout(timeoutId);
             
-            if (!response.ok) continue;
+            if (!response.ok) {
+                // If it fails, remove it from the root domain list so we can try another link from that domain later
+                visitedRootDomains.delete(rootDomain);
+                continue;
+            }
             
-            // Check Content-Type to make sure it's actually HTML
             const contentType = response.headers.get("content-type") || "";
-            if (!contentType.includes("text/html")) continue;
+            if (!contentType.includes("text/html")) {
+                visitedRootDomains.delete(rootDomain);
+                continue;
+            }
 
             const htmlText = await response.text();
 
-            // --- UPGRADED SPIDER LOGIC ---
             const linkMatches = htmlText.match(/href="https?:\/\/[^"]+"/g) || [];
             
             linkMatches.forEach(link => {
@@ -70,23 +85,17 @@ async function startSpider(targetCount = 150) {
                 
                 try {
                     const parsedLink = new URL(cleanLink);
+                    const parsedRootDomain = getBaseDomain(parsedLink.hostname);
                     
-                    // SAFEGUARD 2: Stranger Danger (Must be a different domain)
-                    if (parsedLink.hostname === currentDomain) return;
-                    
-                    // SAFEGUARD 3: Asset Bouncer (Must not be a file format)
+                    if (parsedRootDomain === rootDomain) return; // Stranger danger
                     if (badExtensions.test(parsedLink.pathname)) return;
 
-                    // Apply Safeguard 1 (Never queue the same exact URL twice)
                     if (!visitedUrls.has(cleanLink)) {
                         visitedUrls.add(cleanLink);
                         queue.push(cleanLink);
                     }
-                } catch (e) {
-                    // Ignore malformed links
-                }
+                } catch (e) {}
             });
-            // -----------------------------
 
             const tagMatches = htmlText.match(/<[^>]+>/g) || [];
             const seenOnThisSite = new Set();
@@ -105,12 +114,14 @@ async function startSpider(targetCount = 150) {
             });
 
             successfulSites++;
+            scrapedUrlsList.push(currentUrl); // NEW: Save to our master list
             
             if (successfulSites % 10 === 0) {
-                crawlLogs.push(`Scraped ${successfulSites}/${targetCount} domains... (Latest: ${currentDomain})`);
+                crawlLogs.push(`Scraped ${successfulSites}/${targetCount} domains... (Latest: ${rootDomain})`);
             }
 
         } catch (error) {
+            visitedRootDomains.delete(rootDomain);
             continue;
         }
     }
@@ -146,7 +157,14 @@ app.post('/api/start', (req, res) => {
 });
 
 app.get('/api/status', (req, res) => {
-    res.json({ isCrawling, sitesProcessed: successfulSites, logs: crawlLogs, dictionary: finalDictionary });
+    // NEW: We are now sending the scrapedUrls array to the frontend
+    res.json({ 
+        isCrawling, 
+        sitesProcessed: successfulSites, 
+        logs: crawlLogs, 
+        dictionary: finalDictionary,
+        scrapedUrls: scrapedUrlsList 
+    });
 });
 
 app.listen(PORT, () => {
