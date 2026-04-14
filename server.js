@@ -1,5 +1,6 @@
 const express = require('express');
 const path = require('path');
+const certstream = require('certstream');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -9,99 +10,94 @@ app.use(express.static(path.join(__dirname)));
 let isCrawling = false;
 let successfulSites = 0;
 let crawlLogs = [];
-let scrapedUrlsList = []; // NEW: The Captain's Log
+let scrapedUrlsList = []; 
 let finalDictionary = null;
 
-const seedUrls = [
-    "https://news.ycombinator.com/",
-    "https://www.reddit.com",
-    "https://github.com",
-    "https://dev.to",
-    "https://en.wikipedia.org/wiki/Main_Page"
-];
-
-const badExtensions = /\.(js|css|pdf|png|jpe?g|gif|svg|ico|xml|json|zip|mp3|mp4)$/i;
-
-// NEW: Root Domain Extractor
-function getBaseDomain(hostname) {
-    const parts = hostname.split('.');
-    // Handle things like .co.uk or .com.au
-    if (parts.length > 2 && (parts[parts.length - 2] === 'co' || parts[parts.length - 2] === 'com' || parts[parts.length - 2] === 'org')) {
-        return parts.slice(-3).join('.'); 
-    }
-    return parts.slice(-2).join('.'); // Turns en.wikipedia.org into wikipedia.org
-}
+// Target parameters for our unbiased queue
+const TARGET_API_DOMAINS = 100; 
+const TARGET_LIVE_DOMAINS = 50; 
 
 async function startSpider(targetCount = 150) {
     isCrawling = true;
     successfulSites = 0;
-    crawlLogs = ["Initializing spider..."];
-    scrapedUrlsList = []; // Clear previous logs
+    crawlLogs = ["Initializing unbiased spider..."];
+    scrapedUrlsList = []; 
     finalDictionary = null;
 
-    const queue = [...seedUrls];
-    const visitedRootDomains = new Set(); // UPGRADED: Tracks root domains, not hostnames
-    const visitedUrls = new Set([...seedUrls]); 
+    let queue = [];
     const tagData = {};
 
-    while (queue.length > 0 && successfulSites < targetCount) {
-        const currentUrl = queue.shift();
+    // ==========================================
+    // PHASE 1: Build the Unbiased Queue
+    // ==========================================
+    crawlLogs.push("🌍 Fetching established random domains from API...");
+    try {
+        const response = await fetch('https://raw.githubusercontent.com/statscounter/random-domains/main/sample.txt');
+        const text = await response.text();
+        const apiDomains = text.split('\n').filter(Boolean).slice(0, TARGET_API_DOMAINS);
         
-        let urlObj;
-        try { urlObj = new URL(currentUrl); } 
-        catch (e) { continue; }
+        apiDomains.forEach(domain => queue.push(`https://${domain.trim()}`));
+        crawlLogs.push(`✅ Added ${apiDomains.length} established domains.`);
+    } catch (err) {
+        crawlLogs.push("❌ Failed to fetch API domains. Falling back to CertStream only.");
+    }
 
-        // Extract the root domain to avoid subdomain traps
-        const rootDomain = getBaseDomain(urlObj.hostname);
-        
-        if (visitedRootDomains.has(rootDomain)) continue;
-        visitedRootDomains.add(rootDomain);
+    crawlLogs.push("📡 Tapping into live certificate logs (Waiting for new websites)...");
+    
+    // Wrap CertStream in a Promise so we halt execution until we catch our quota
+    await new Promise((resolve) => {
+        let liveCount = 0;
+
+        const client = certstream.client(function(message) {
+            if (liveCount >= TARGET_LIVE_DOMAINS) return; // Stop processing once target is met
+
+            if (message.message_type === "certificate_update") {
+                const newDomain = message.data.leaf_cert.all_domains[0];
+                
+                if (newDomain && !newDomain.startsWith('*.')) {
+                    queue.push(`https://${newDomain}`);
+                    liveCount++;
+                    
+                    // Only push log every 10 domains so we don't spam the frontend UI
+                    if (liveCount % 10 === 0) {
+                        crawlLogs.push(`Caught live domain ${liveCount}/${TARGET_LIVE_DOMAINS}: ${newDomain}`);
+                    }
+                }
+            }
+
+            if (liveCount >= TARGET_LIVE_DOMAINS) {
+                crawlLogs.push("✅ Live domain harvesting complete!");
+                resolve(); 
+            }
+        });
+    });
+
+    crawlLogs.push(`🚀 Queue locked and loaded with ${queue.length} totally unbiased URLs. Releasing the spider...`);
+
+    // ==========================================
+    // PHASE 2: Process Queue (No Link Hopping!)
+    // ==========================================
+    for (const url of queue) {
+        if (successfulSites >= targetCount) break; // Stop if we hit our max
 
         try {
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 5000);
             
-            const response = await fetch(currentUrl, { signal: controller.signal });
+            const response = await fetch(url, { signal: controller.signal });
             clearTimeout(timeoutId);
             
-            if (!response.ok) {
-                // If it fails, remove it from the root domain list so we can try another link from that domain later
-                visitedRootDomains.delete(rootDomain);
-                continue;
-            }
+            if (!response.ok) continue;
             
             const contentType = response.headers.get("content-type") || "";
-            if (!contentType.includes("text/html")) {
-                visitedRootDomains.delete(rootDomain);
-                continue;
-            }
+            if (!contentType.includes("text/html")) continue;
 
             const htmlText = await response.text();
-
-            const linkMatches = htmlText.match(/href="https?:\/\/[^"]+"/g) || [];
-            
-            linkMatches.forEach(link => {
-                const cleanLink = link.replace('href="', '').replace('"', '');
-                
-                try {
-                    const parsedLink = new URL(cleanLink);
-                    const parsedRootDomain = getBaseDomain(parsedLink.hostname);
-                    
-                    if (parsedRootDomain === rootDomain) return; // Stranger danger
-                    if (badExtensions.test(parsedLink.pathname)) return;
-
-                    if (!visitedUrls.has(cleanLink)) {
-                        visitedUrls.add(cleanLink);
-                        queue.push(cleanLink);
-                    }
-                } catch (e) {}
-            });
-
             const tagMatches = htmlText.match(/<[^>]+>/g) || [];
             const seenOnThisSite = new Set();
 
             tagMatches.forEach(tag => {
-                const cleanTag = tag.toLowerCase();
+                const cleanTag = tag.toLowerCase().trim();
                 if (!tagData[cleanTag]) {
                     tagData[cleanTag] = { totalCount: 0, sitesAppearedOn: 0 };
                 }
@@ -114,21 +110,24 @@ async function startSpider(targetCount = 150) {
             });
 
             successfulSites++;
-            scrapedUrlsList.push(currentUrl); // NEW: Save to our master list
+            scrapedUrlsList.push(url); 
             
             if (successfulSites % 10 === 0) {
-                crawlLogs.push(`Scraped ${successfulSites}/${targetCount} domains... (Latest: ${rootDomain})`);
+                let urlObj = new URL(url);
+                crawlLogs.push(`Scraped ${successfulSites}/${targetCount} domains... (Latest: ${urlObj.hostname})`);
             }
 
         } catch (error) {
-            visitedRootDomains.delete(rootDomain);
+            // Silently skip domains that timeout or don't have hosting set up yet
             continue;
         }
     }
 
-    crawlLogs.push("Crawling finished! Applying Cross-Pollination Filtering...");
+    crawlLogs.push("🕷️ Crawling finished! Applying Cross-Pollination Filtering...");
 
-    // A tag MUST appear on at least 5% of the unique domains we visited
+    // ==========================================
+    // PHASE 3: Generate Dictionary
+    // ==========================================
     const threshold = Math.max(2, Math.floor(successfulSites * 0.05)); 
     
     const universalTags = Object.keys(tagData)
@@ -138,34 +137,31 @@ async function startSpider(targetCount = 150) {
             sites: tagData[tag].sitesAppearedOn 
         }))
         .filter(item => item.sites >= threshold) 
-        // --- YOUR NEW SORTING LOGIC ---
         .sort((a, b) => {
-            if (b.sites !== a.sites) {
-                return b.sites - a.sites; // Primary Sort: Rank by most unique domains
-            }
-            return b.count - a.count;     // Secondary Sort: Use total occurrences only as a tie-breaker
+            if (b.sites !== a.sites) return b.sites - a.sites; 
+            return b.count - a.count;      
         })
-        // ------------------------------
-        .slice(0, 253);
+        .slice(0, 254);
 
     const dictionary = {};
     universalTags.forEach((item, index) => {
-        let hexCoord = (index + 1).toString(16).toUpperCase().padStart(2, '0');
+        // Starts hex at 00, formats properly for your dashboard
+        let hexCoord = index.toString(16).toUpperCase().padStart(2, '0');
         dictionary[hexCoord] = item.tag;
     });
 
     finalDictionary = dictionary;
-    crawlLogs.push("Dictionary successfully generated!");
+    crawlLogs.push("🎉 Dictionary successfully generated!");
     isCrawling = false;
 }
 
+// API Endpoints
 app.post('/api/start', (req, res) => {
     if (!isCrawling) startSpider(150); 
     res.json({ message: "Spider deployed." });
 });
 
 app.get('/api/status', (req, res) => {
-    // NEW: We are now sending the scrapedUrls array to the frontend
     res.json({ 
         isCrawling, 
         sitesProcessed: successfulSites, 
