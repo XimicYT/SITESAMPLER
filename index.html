@@ -9,33 +9,44 @@
         h1 { color: #569cd6; }
         button { padding: 12px 24px; background: #4caf50; color: white; border: none; font-size: 16px; cursor: pointer; border-radius: 4px; }
         button:disabled { background: #555; cursor: not-allowed; }
-        #console { background: #000; color: #0f0; padding: 15px; height: 150px; overflow-y: auto; margin-top: 20px; border: 1px solid #333; }
-        #dictionaryOutput { background: #2d2d2d; color: #ce9178; padding: 15px; height: 300px; overflow-y: auto; margin-top: 20px; border: 1px solid #333; }
+        .box { background: #000; padding: 15px; margin-top: 20px; border: 1px solid #333; overflow-y: auto; }
+        #console { color: #0f0; height: 150px; }
+        #dictionaryOutput { color: #ce9178; height: 300px; }
+        #urlLogOutput { color: #9cdcfe; height: 200px; } /* NEW: URL Log styling */
+        .flex-container { display: flex; gap: 20px; }
+        .flex-child { flex: 1; }
     </style>
 </head>
 <body>
 
-    <h1>Global HTML Spider</h1>
-    <p>This will deploy a backend spider to crawl random domains, count HTML clusters, and build your compression MVP dictionary.</p>
+    <h1>Global HTML Spider (v2)</h1>
+    <p>Spidering the web to build a purely universal compression dictionary.</p>
     
     <button id="startBtn" onclick="startCrawl()">Deploy Spider</button>
 
     <h3>Live Server Logs:</h3>
-    <div id="console">Awaiting deployment...</div>
+    <div id="console" class="box">Awaiting deployment...</div>
 
-    <h3>Final Generated Dictionary (JSON):</h3>
-    <pre id="dictionaryOutput">Waiting for spider to finish...</pre>
+    <div class="flex-container">
+        <div class="flex-child">
+            <h3>Final Generated Dictionary (JSON):</h3>
+            <pre id="dictionaryOutput" class="box">Waiting for spider to finish...</pre>
+        </div>
+        <div class="flex-child">
+            <h3>Sites Successfully Scraped:</h3>
+            <pre id="urlLogOutput" class="box">Waiting for spider to finish...</pre>
+        </div>
+    </div>
 
     <script>
         let pollInterval;
 
         async function startCrawl() {
             document.getElementById('startBtn').disabled = true;
+            document.getElementById('dictionaryOutput').textContent = "Crawling in progress...";
+            document.getElementById('urlLogOutput').textContent = "Crawling in progress...";
             
-            // Tell the Node server to start spidering
             await fetch('/api/start', { method: 'POST' });
-            
-            // Start pinging the server every 2 seconds for updates
             pollInterval = setInterval(checkStatus, 2000);
         }
 
@@ -43,15 +54,17 @@
             const response = await fetch('/api/status');
             const data = await response.json();
 
-            // Update the terminal box
             const consoleDiv = document.getElementById('console');
             consoleDiv.innerHTML = data.logs.join('<br>');
             consoleDiv.scrollTop = consoleDiv.scrollHeight;
 
-            // If the spider is done, stop polling and show the JSON
             if (!data.isCrawling && data.dictionary) {
                 clearInterval(pollInterval);
                 document.getElementById('dictionaryOutput').textContent = JSON.stringify(data.dictionary, null, 2);
+                
+                // NEW: Populate the scraped sites box
+                document.getElementById('urlLogOutput').textContent = data.scrapedUrls.join('\n');
+                
                 document.getElementById('startBtn').disabled = false;
                 document.getElementById('startBtn').innerText = "Run Again";
             }
