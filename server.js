@@ -4,16 +4,13 @@ const path = require('path');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Serve the index.html file
 app.use(express.static(path.join(__dirname)));
 
-// Global state variables so the frontend can check progress
 let isCrawling = false;
 let successfulSites = 0;
 let crawlLogs = [];
 let finalDictionary = null;
 
-// The Seed URLs: The spider starts here and branches out
 const seedUrls = [
     "https://news.ycombinator.com/",
     "https://www.reddit.com",
@@ -21,6 +18,9 @@ const seedUrls = [
     "https://dev.to",
     "https://en.wikipedia.org/wiki/Main_Page"
 ];
+
+// List of file extensions we DO NOT want to scrape
+const badExtensions = /\.(js|css|pdf|png|jpe?g|gif|svg|ico|xml|json|zip|mp3|mp4)$/i;
 
 async function startSpider(targetCount = 150) {
     isCrawling = true;
@@ -30,25 +30,24 @@ async function startSpider(targetCount = 150) {
 
     const queue = [...seedUrls];
     const visitedDomains = new Set();
+    
+    // SAFEGUARD 1: The Global Memory Bank (Prevents infinite A -> B -> A loops)
+    const visitedUrls = new Set([...seedUrls]); 
     const tagData = {};
 
-    // Keep crawling until we hit our target OR run out of links
     while (queue.length > 0 && successfulSites < targetCount) {
         const currentUrl = queue.shift();
         
         let urlObj;
-        try {
-            urlObj = new URL(currentUrl);
-        } catch (e) { continue; } // Skip malformed URLs
+        try { urlObj = new URL(currentUrl); } 
+        catch (e) { continue; }
 
-        const domain = urlObj.hostname;
+        const currentDomain = urlObj.hostname;
         
-        // Ensure we only visit ONE page per domain to maximize diversity
-        if (visitedDomains.has(domain)) continue;
-        visitedDomains.add(domain);
+        if (visitedDomains.has(currentDomain)) continue;
+        visitedDomains.add(currentDomain);
 
         try {
-            // 5-second timeout so the spider doesn't get stuck on slow servers
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 5000);
             
@@ -56,16 +55,39 @@ async function startSpider(targetCount = 150) {
             clearTimeout(timeoutId);
             
             if (!response.ok) continue;
+            
+            // Check Content-Type to make sure it's actually HTML
+            const contentType = response.headers.get("content-type") || "";
+            if (!contentType.includes("text/html")) continue;
+
             const htmlText = await response.text();
 
-            // 1. SPIDER LOGIC: Find new links to add to the queue
+            // --- UPGRADED SPIDER LOGIC ---
             const linkMatches = htmlText.match(/href="https?:\/\/[^"]+"/g) || [];
+            
             linkMatches.forEach(link => {
                 const cleanLink = link.replace('href="', '').replace('"', '');
-                queue.push(cleanLink);
-            });
+                
+                try {
+                    const parsedLink = new URL(cleanLink);
+                    
+                    // SAFEGUARD 2: Stranger Danger (Must be a different domain)
+                    if (parsedLink.hostname === currentDomain) return;
+                    
+                    // SAFEGUARD 3: Asset Bouncer (Must not be a file format)
+                    if (badExtensions.test(parsedLink.pathname)) return;
 
-            // 2. DICTIONARY LOGIC: Extract and count HTML tags
+                    // Apply Safeguard 1 (Never queue the same exact URL twice)
+                    if (!visitedUrls.has(cleanLink)) {
+                        visitedUrls.add(cleanLink);
+                        queue.push(cleanLink);
+                    }
+                } catch (e) {
+                    // Ignore malformed links
+                }
+            });
+            // -----------------------------
+
             const tagMatches = htmlText.match(/<[^>]+>/g) || [];
             const seenOnThisSite = new Set();
 
@@ -76,7 +98,6 @@ async function startSpider(targetCount = 150) {
                 }
                 tagData[cleanTag].totalCount += 1;
                 
-                // Cross-pollination tracking
                 if (!seenOnThisSite.has(cleanTag)) {
                     tagData[cleanTag].sitesAppearedOn += 1;
                     seenOnThisSite.add(cleanTag);
@@ -85,20 +106,17 @@ async function startSpider(targetCount = 150) {
 
             successfulSites++;
             
-            // Log progress every 10 sites
             if (successfulSites % 10 === 0) {
-                crawlLogs.push(`Scraped ${successfulSites}/${targetCount} domains... (Latest: ${domain})`);
+                crawlLogs.push(`Scraped ${successfulSites}/${targetCount} domains... (Latest: ${currentDomain})`);
             }
 
         } catch (error) {
-            // If a site blocks us or times out, silently skip it
             continue;
         }
     }
 
     crawlLogs.push("Crawling finished! Applying Cross-Pollination Filtering...");
 
-    // A tag MUST appear on at least 5% of the unique domains we visited
     const threshold = Math.max(2, Math.floor(successfulSites * 0.05)); 
     
     const universalTags = Object.keys(tagData)
@@ -111,7 +129,6 @@ async function startSpider(targetCount = 150) {
         .sort((a, b) => b.count - a.count)
         .slice(0, 253);
 
-    // Build the final JSON dictionary
     const dictionary = {};
     universalTags.forEach((item, index) => {
         let hexCoord = (index + 1).toString(16).toUpperCase().padStart(2, '0');
@@ -123,24 +140,13 @@ async function startSpider(targetCount = 150) {
     isCrawling = false;
 }
 
-// --- API ENDPOINTS ---
-
-// Trigger the spider
 app.post('/api/start', (req, res) => {
-    if (!isCrawling) {
-        startSpider(150); // Target number of unique domains
-    }
+    if (!isCrawling) startSpider(150); 
     res.json({ message: "Spider deployed." });
 });
 
-// Let the frontend poll for live updates
 app.get('/api/status', (req, res) => {
-    res.json({
-        isCrawling: isCrawling,
-        sitesProcessed: successfulSites,
-        logs: crawlLogs,
-        dictionary: finalDictionary
-    });
+    res.json({ isCrawling, sitesProcessed: successfulSites, logs: crawlLogs, dictionary: finalDictionary });
 });
 
 app.listen(PORT, () => {
