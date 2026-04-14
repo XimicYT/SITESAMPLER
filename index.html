@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Compression Spider Dashboard</title>
+    <style>
+        body { font-family: 'Courier New', Courier, monospace; padding: 30px; background: #1e1e1e; color: #d4d4d4; }
+        h1 { color: #569cd6; }
+        button { padding: 12px 24px; background: #4caf50; color: white; border: none; font-size: 16px; cursor: pointer; border-radius: 4px; }
+        button:disabled { background: #555; cursor: not-allowed; }
+        #console { background: #000; color: #0f0; padding: 15px; height: 150px; overflow-y: auto; margin-top: 20px; border: 1px solid #333; }
+        #dictionaryOutput { background: #2d2d2d; color: #ce9178; padding: 15px; height: 300px; overflow-y: auto; margin-top: 20px; border: 1px solid #333; }
+    </style>
+</head>
+<body>
+
+    <h1>Global HTML Spider</h1>
+    <p>This will deploy a backend spider to crawl random domains, count HTML clusters, and build your compression MVP dictionary.</p>
+    
+    <button id="startBtn" onclick="startCrawl()">Deploy Spider</button>
+
+    <h3>Live Server Logs:</h3>
+    <div id="console">Awaiting deployment...</div>
+
+    <h3>Final Generated Dictionary (JSON):</h3>
+    <pre id="dictionaryOutput">Waiting for spider to finish...</pre>
+
+    <script>
+        let pollInterval;
+
+        async function startCrawl() {
+            document.getElementById('startBtn').disabled = true;
+            
+            // Tell the Node server to start spidering
+            await fetch('/api/start', { method: 'POST' });
+            
+            // Start pinging the server every 2 seconds for updates
+            pollInterval = setInterval(checkStatus, 2000);
+        }
+
+        async function checkStatus() {
+            const response = await fetch('/api/status');
+            const data = await response.json();
+
+            // Update the terminal box
+            const consoleDiv = document.getElementById('console');
+            consoleDiv.innerHTML = data.logs.join('<br>');
+            consoleDiv.scrollTop = consoleDiv.scrollHeight;
+
+            // If the spider is done, stop polling and show the JSON
+            if (!data.isCrawling && data.dictionary) {
+                clearInterval(pollInterval);
+                document.getElementById('dictionaryOutput').textContent = JSON.stringify(data.dictionary, null, 2);
+                document.getElementById('startBtn').disabled = false;
+                document.getElementById('startBtn').innerText = "Run Again";
+            }
+        }
+    </script>
+</body>
+</html>
