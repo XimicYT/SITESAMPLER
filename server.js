@@ -50,30 +50,33 @@ async function startSpider() {
     let queue = [];
 
     // ==========================================
-    // PHASE 1: Dictionary Domain Generation
+    // PHASE 1: OpenRing API Integration
     // ==========================================
-    crawlLogs.push("🌍 Generating unbiased domains from dictionary base...");
+    crawlLogs.push("🌍 Fetching established domains from OpenRing API...");
     try {
-        // Fetch common English words from a reliable repo
-        const response = await fetch('https://raw.githubusercontent.com/first20hours/google-10000-english/master/google-10000-english-no-swears.txt');
-        if (!response.ok) throw new Error("API returned " + response.status);
+        // NOTE: Replace this with the actual deployed OpenRing worker URL you want to target
+        const OPENRING_LIST_URL = 'https://your-worker.workers.dev/list'; 
         
-        const text = await response.text();
-        const words = text.split('\n').filter(w => w.length > 4); // Skip tiny words
-        words.sort(() => 0.5 - Math.random()); // Shuffle them
+        const response = await fetch(OPENRING_LIST_URL);
+        if (!response.ok) throw new Error("OpenRing API returned " + response.status);
         
-        const extensions = ['.com', '.org', '.net', '.io', '.co'];
-        // Generate 4,000 URLs to guarantee we have enough fuel for 2,500 successful scrapes
-        words.slice(0, 4000).forEach((word, i) => {
-            const ext = extensions[i % extensions.length];
-            queue.push(`https://${word.trim()}${ext}`);
+        const data = await response.json();
+        
+        // The API might return an array directly, or an object with a sites array. We handle both.
+        const sites = Array.isArray(data) ? data : (data.sites || []);
+        
+        let ringCount = 0;
+        sites.forEach(site => {
+            if (site.url) {
+                queue.push(site.url);
+                ringCount++;
+            }
         });
         
-        crawlLogs.push(`✅ Instantly loaded 4000 random root domains.`);
+        crawlLogs.push(`✅ Successfully loaded ${ringCount} domains from the webring.`);
     } catch (err) {
-        crawlLogs.push(`❌ Domain fetch failed. Relying strictly on CertStream.`);
+        crawlLogs.push(`❌ OpenRing fetch failed (${err.message}). Falling back to CertStream.`);
     }
-
     // ==========================================
     // PHASE 2: CertStream with Escape Hatch
     // ==========================================
