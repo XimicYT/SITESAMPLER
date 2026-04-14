@@ -1,6 +1,7 @@
 const express = require('express');
 const path = require('path');
-const certstream = require('certstream');
+const CertStreamClient = require('certstream');
+const fs = require('fs');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -8,24 +9,49 @@ const PORT = process.env.PORT || 3000;
 app.use(express.static(path.join(__dirname)));
 
 let isCrawling = false;
-let successfulSites = 0;
+let sessionSites = 0;
 let crawlLogs = [];
 let scrapedUrlsList = []; 
 let finalDictionary = null;
 
-// Target parameters for our unbiased queue
-const TARGET_API_DOMAINS = 100; 
-const TARGET_LIVE_DOMAINS = 50; 
+// NEW: Persistent Memory File
+const MEMORY_FILE = path.join(__dirname, 'spider_memory.json');
 
-async function startSpider(targetCount = 150) {
+// NEW: Scale up to 2500 domains per run
+const TARGET_API_DOMAINS = 500; 
+const TARGET_LIVE_DOMAINS = 2000; 
+const TOTAL_TARGET = TARGET_API_DOMAINS + TARGET_LIVE_DOMAINS;
+
+// Load previous runs if they exist
+function loadMemory() {
+    if (fs.existsSync(MEMORY_FILE)) {
+        try {
+            return JSON.parse(fs.readFileSync(MEMORY_FILE, 'utf-8'));
+        } catch (e) {
+            return { totalSitesScraped: 0, tagData: {} };
+        }
+    }
+    return { totalSitesScraped: 0, tagData: {} };
+}
+
+// Save current state so we can accumulate later
+function saveMemory(data) {
+    fs.writeFileSync(MEMORY_FILE, JSON.stringify(data, null, 2));
+}
+
+async function startSpider() {
     isCrawling = true;
-    successfulSites = 0;
-    crawlLogs = ["Initializing unbiased spider..."];
+    sessionSites = 0;
     scrapedUrlsList = []; 
     finalDictionary = null;
+    
+    let memory = loadMemory();
+    crawlLogs = [
+        `🕷️ Spider deployed! Session target: ${TOTAL_TARGET} domains.`, 
+        `🧠 Loaded previous memory: ${memory.totalSitesScraped} all-time sites scraped.`
+    ];
 
     let queue = [];
-    const tagData = {};
 
     // ==========================================
     // PHASE 1: Build the Unbiased Queue
@@ -39,17 +65,16 @@ async function startSpider(targetCount = 150) {
         apiDomains.forEach(domain => queue.push(`https://${domain.trim()}`));
         crawlLogs.push(`✅ Added ${apiDomains.length} established domains.`);
     } catch (err) {
-        crawlLogs.push("❌ Failed to fetch API domains. Falling back to CertStream only.");
+        crawlLogs.push("❌ API fetch failed. Falling back to 100% CertStream.");
     }
 
-    crawlLogs.push("📡 Tapping into live certificate logs (Waiting for new websites)...");
+    crawlLogs.push(`📡 Tapping into live certificate logs (Waiting for ${TARGET_LIVE_DOMAINS} new websites)...`);
     
-    // Wrap CertStream in a Promise so we halt execution until we catch our quota
     await new Promise((resolve) => {
         let liveCount = 0;
 
-        const client = certstream.client(function(message) {
-            if (liveCount >= TARGET_LIVE_DOMAINS) return; // Stop processing once target is met
+        const client = new CertStreamClient(function(message) {
+            if (liveCount >= TARGET_LIVE_DOMAINS) return; 
 
             if (message.message_type === "certificate_update") {
                 const newDomain = message.data.leaf_cert.all_domains[0];
@@ -58,10 +83,11 @@ async function startSpider(targetCount = 150) {
                     queue.push(`https://${newDomain}`);
                     liveCount++;
                     
-                    // Only push log every 10 domains so we don't spam the frontend UI
-                    if (liveCount % 10 === 0) {
-                        crawlLogs.push(`Caught live domain ${liveCount}/${TARGET_LIVE_DOMAINS}: ${newDomain}`);
-                    }
+                    // Shows EVERY captured live domain
+                    crawlLogs.push(`📡 Caught live domain [${liveCount}/${TARGET_LIVE_DOMAINS}]: ${newDomain}`);
+                    
+                    // Keep log box from crashing the browser by capping live lines
+                    if (crawlLogs.length > 200) crawlLogs.shift();
                 }
             }
 
@@ -70,19 +96,21 @@ async function startSpider(targetCount = 150) {
                 resolve(); 
             }
         });
+        
+        client.connect();
     });
 
-    crawlLogs.push(`🚀 Queue locked and loaded with ${queue.length} totally unbiased URLs. Releasing the spider...`);
+    crawlLogs.push(`🚀 Queue locked and loaded. Starting the scrape engine...`);
 
     // ==========================================
-    // PHASE 2: Process Queue (No Link Hopping!)
+    // PHASE 2: Process Queue
     // ==========================================
     for (const url of queue) {
-        if (successfulSites >= targetCount) break; // Stop if we hit our max
+        if (sessionSites >= TOTAL_TARGET) break;
 
         try {
             const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 5000);
+            const timeoutId = setTimeout(() => controller.abort(), 4000); 
             
             const response = await fetch(url, { signal: controller.signal });
             clearTimeout(timeoutId);
@@ -98,43 +126,49 @@ async function startSpider(targetCount = 150) {
 
             tagMatches.forEach(tag => {
                 const cleanTag = tag.toLowerCase().trim();
-                if (!tagData[cleanTag]) {
-                    tagData[cleanTag] = { totalCount: 0, sitesAppearedOn: 0 };
+                if (!memory.tagData[cleanTag]) {
+                    memory.tagData[cleanTag] = { totalCount: 0, sitesAppearedOn: 0 };
                 }
-                tagData[cleanTag].totalCount += 1;
+                memory.tagData[cleanTag].totalCount += 1;
                 
                 if (!seenOnThisSite.has(cleanTag)) {
-                    tagData[cleanTag].sitesAppearedOn += 1;
+                    memory.tagData[cleanTag].sitesAppearedOn += 1;
                     seenOnThisSite.add(cleanTag);
                 }
             });
 
-            successfulSites++;
+            sessionSites++;
+            memory.totalSitesScraped++;
             scrapedUrlsList.push(url); 
             
-            if (successfulSites % 10 === 0) {
-                let urlObj = new URL(url);
-                crawlLogs.push(`Scraped ${successfulSites}/${targetCount} domains... (Latest: ${urlObj.hostname})`);
+            // Logs EVERY scraped site directly to the frontend
+            crawlLogs.push(`🕸️ Scraped [${sessionSites}]: ${url}`);
+
+            if (crawlLogs.length > 200) {
+                crawlLogs.shift();
             }
 
         } catch (error) {
-            // Silently skip domains that timeout or don't have hosting set up yet
             continue;
         }
     }
 
+    // Save the memory globally so the next run adds to it!
+    saveMemory(memory);
+    crawlLogs.push(`💾 Progress saved to spider_memory.json. All-time scraped: ${memory.totalSitesScraped}`);
     crawlLogs.push("🕷️ Crawling finished! Applying Cross-Pollination Filtering...");
 
     // ==========================================
-    // PHASE 3: Generate Dictionary
+    // PHASE 3: Generate Dictionary (Using ALL-TIME Data)
     // ==========================================
-    const threshold = Math.max(2, Math.floor(successfulSites * 0.05)); 
+    // A tag MUST appear on 5% of all historical domains combined
+    const threshold = Math.max(2, Math.floor(memory.totalSitesScraped * 0.05)); 
     
-    const universalTags = Object.keys(tagData)
+    const universalTags = Object.keys(memory.tagData)
         .map(tag => ({ 
             tag: tag, 
-            count: tagData[tag].totalCount, 
-            sites: tagData[tag].sitesAppearedOn 
+            count: memory.tagData[tag].totalCount, 
+            sites: memory.tagData[tag].sitesAppearedOn 
         }))
         .filter(item => item.sites >= threshold) 
         .sort((a, b) => {
@@ -145,7 +179,6 @@ async function startSpider(targetCount = 150) {
 
     const dictionary = {};
     universalTags.forEach((item, index) => {
-        // Starts hex at 00, formats properly for your dashboard
         let hexCoord = index.toString(16).toUpperCase().padStart(2, '0');
         dictionary[hexCoord] = item.tag;
     });
@@ -157,14 +190,14 @@ async function startSpider(targetCount = 150) {
 
 // API Endpoints
 app.post('/api/start', (req, res) => {
-    if (!isCrawling) startSpider(150); 
+    if (!isCrawling) startSpider(); 
     res.json({ message: "Spider deployed." });
 });
 
 app.get('/api/status', (req, res) => {
     res.json({ 
         isCrawling, 
-        sitesProcessed: successfulSites, 
+        sitesProcessed: sessionSites, 
         logs: crawlLogs, 
         dictionary: finalDictionary,
         scrapedUrls: scrapedUrlsList 
