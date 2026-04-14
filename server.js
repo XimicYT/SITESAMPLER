@@ -14,15 +14,12 @@ let crawlLogs = [];
 let scrapedUrlsList = []; 
 let finalDictionary = null;
 
-// NEW: Persistent Memory File
+// Persistent Memory File
 const MEMORY_FILE = path.join(__dirname, 'spider_memory.json');
 
-// NEW: Scale up to 2500 domains per run
-const TARGET_API_DOMAINS = 500; 
-const TARGET_LIVE_DOMAINS = 2000; 
-const TOTAL_TARGET = TARGET_API_DOMAINS + TARGET_LIVE_DOMAINS;
+// Session target
+const TARGET_SITES = 2500; 
 
-// Load previous runs if they exist
 function loadMemory() {
     if (fs.existsSync(MEMORY_FILE)) {
         try {
@@ -34,7 +31,6 @@ function loadMemory() {
     return { totalSitesScraped: 0, tagData: {} };
 }
 
-// Save current state so we can accumulate later
 function saveMemory(data) {
     fs.writeFileSync(MEMORY_FILE, JSON.stringify(data, null, 2));
 }
@@ -47,70 +43,98 @@ async function startSpider() {
     
     let memory = loadMemory();
     crawlLogs = [
-        `🕷️ Spider deployed! Session target: ${TOTAL_TARGET} domains.`, 
+        `🕷️ Spider deployed! Session target: ${TARGET_SITES} domains.`, 
         `🧠 Loaded previous memory: ${memory.totalSitesScraped} all-time sites scraped.`
     ];
 
     let queue = [];
 
     // ==========================================
-    // PHASE 1: Build the Unbiased Queue
+    // PHASE 1: Dictionary Domain Generation
     // ==========================================
-    crawlLogs.push("🌍 Fetching established random domains from API...");
+    crawlLogs.push("🌍 Generating unbiased domains from dictionary base...");
     try {
-        const response = await fetch('https://raw.githubusercontent.com/statscounter/random-domains/main/sample.txt');
-        const text = await response.text();
-        const apiDomains = text.split('\n').filter(Boolean).slice(0, TARGET_API_DOMAINS);
+        // Fetch common English words from a reliable repo
+        const response = await fetch('https://raw.githubusercontent.com/first20hours/google-10000-english/master/google-10000-english-no-swears.txt');
+        if (!response.ok) throw new Error("API returned " + response.status);
         
-        apiDomains.forEach(domain => queue.push(`https://${domain.trim()}`));
-        crawlLogs.push(`✅ Added ${apiDomains.length} established domains.`);
+        const text = await response.text();
+        const words = text.split('\n').filter(w => w.length > 4); // Skip tiny words
+        words.sort(() => 0.5 - Math.random()); // Shuffle them
+        
+        const extensions = ['.com', '.org', '.net', '.io', '.co'];
+        // Generate 4,000 URLs to guarantee we have enough fuel for 2,500 successful scrapes
+        words.slice(0, 4000).forEach((word, i) => {
+            const ext = extensions[i % extensions.length];
+            queue.push(`https://${word.trim()}${ext}`);
+        });
+        
+        crawlLogs.push(`✅ Instantly loaded 4000 random root domains.`);
     } catch (err) {
-        crawlLogs.push("❌ API fetch failed. Falling back to 100% CertStream.");
+        crawlLogs.push(`❌ Domain fetch failed. Relying strictly on CertStream.`);
     }
 
-    crawlLogs.push(`📡 Tapping into live certificate logs (Waiting for ${TARGET_LIVE_DOMAINS} new websites)...`);
+    // ==========================================
+    // PHASE 2: CertStream with Escape Hatch
+    // ==========================================
+    crawlLogs.push(`📡 Tapping live certificate logs (Waiting for new domains)...`);
     
     await new Promise((resolve) => {
         let liveCount = 0;
 
-        const client = new CertStreamClient(function(message) {
-            if (liveCount >= TARGET_LIVE_DOMAINS) return; 
+        // ESCAPE HATCH: If blocked by host, force start after 12 seconds
+        const failSafe = setTimeout(() => {
+            crawlLogs.push("⚠️ CertStream websocket blocked/timed out! Activating Escape Hatch. Releasing spider early...");
+            resolve();
+        }, 12000); 
 
-            if (message.message_type === "certificate_update") {
-                const newDomain = message.data.leaf_cert.all_domains[0];
-                
-                if (newDomain && !newDomain.startsWith('*.')) {
-                    queue.push(`https://${newDomain}`);
-                    liveCount++;
+        try {
+            const client = new CertStreamClient(function(message) {
+                if (message.message_type === "certificate_update") {
+                    const newDomain = message.data.leaf_cert.all_domains[0];
                     
-                    // Shows EVERY captured live domain
-                    crawlLogs.push(`📡 Caught live domain [${liveCount}/${TARGET_LIVE_DOMAINS}]: ${newDomain}`);
-                    
-                    // Keep log box from crashing the browser by capping live lines
-                    if (crawlLogs.length > 200) crawlLogs.shift();
+                    if (newDomain && !newDomain.startsWith('*.')) {
+                        queue.push(`https://${newDomain}`);
+                        liveCount++;
+                        
+                        crawlLogs.push(`📡 Caught live domain: ${newDomain}`);
+                        if (crawlLogs.length > 200) crawlLogs.shift();
+                    }
                 }
-            }
 
-            if (liveCount >= TARGET_LIVE_DOMAINS) {
-                crawlLogs.push("✅ Live domain harvesting complete!");
-                resolve(); 
-            }
-        });
-        
-        client.connect();
+                // If it works, grab up to 500 live domains to mix into the queue
+                if (liveCount >= 500) {
+                    clearTimeout(failSafe);
+                    crawlLogs.push("✅ Live domain harvesting complete!");
+                    resolve(); 
+                }
+            });
+            client.connect();
+        } catch (e) {
+            clearTimeout(failSafe);
+            crawlLogs.push("⚠️ CertStream failed to connect. Skipping to dictionary domains...");
+            resolve();
+        }
     });
 
-    crawlLogs.push(`🚀 Queue locked and loaded. Starting the scrape engine...`);
+    if (queue.length === 0) {
+        crawlLogs.push("❌ Queue is empty! Check your server's outbound network connections.");
+        isCrawling = false;
+        return;
+    }
+
+    crawlLogs.push(`🚀 Queue locked and loaded with ${queue.length} URLs. Starting the scrape engine...`);
 
     // ==========================================
-    // PHASE 2: Process Queue
+    // PHASE 3: Process Queue
     // ==========================================
     for (const url of queue) {
-        if (sessionSites >= TOTAL_TARGET) break;
+        if (sessionSites >= TARGET_SITES) break;
 
         try {
             const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 4000); 
+            // Drop dead sites fast (3 seconds max)
+            const timeoutId = setTimeout(() => controller.abort(), 3000); 
             
             const response = await fetch(url, { signal: controller.signal });
             clearTimeout(timeoutId);
@@ -122,8 +146,11 @@ async function startSpider() {
 
             const htmlText = await response.text();
             const tagMatches = htmlText.match(/<[^>]+>/g) || [];
-            const seenOnThisSite = new Set();
+            
+            // Skip pages that are virtually empty (likely holding pages or errors)
+            if (tagMatches.length < 5) continue; 
 
+            const seenOnThisSite = new Set();
             tagMatches.forEach(tag => {
                 const cleanTag = tag.toLowerCase().trim();
                 if (!memory.tagData[cleanTag]) {
@@ -141,27 +168,22 @@ async function startSpider() {
             memory.totalSitesScraped++;
             scrapedUrlsList.push(url); 
             
-            // Logs EVERY scraped site directly to the frontend
-            crawlLogs.push(`🕸️ Scraped [${sessionSites}]: ${url}`);
-
-            if (crawlLogs.length > 200) {
-                crawlLogs.shift();
-            }
+            crawlLogs.push(`🕸️ Scraped [${sessionSites}/${TARGET_SITES}]: ${url}`);
+            if (crawlLogs.length > 200) crawlLogs.shift();
 
         } catch (error) {
+            // Silently skip domains that don't exist
             continue;
         }
     }
 
-    // Save the memory globally so the next run adds to it!
     saveMemory(memory);
     crawlLogs.push(`💾 Progress saved to spider_memory.json. All-time scraped: ${memory.totalSitesScraped}`);
     crawlLogs.push("🕷️ Crawling finished! Applying Cross-Pollination Filtering...");
 
     // ==========================================
-    // PHASE 3: Generate Dictionary (Using ALL-TIME Data)
+    // PHASE 4: Generate Dictionary 
     // ==========================================
-    // A tag MUST appear on 5% of all historical domains combined
     const threshold = Math.max(2, Math.floor(memory.totalSitesScraped * 0.05)); 
     
     const universalTags = Object.keys(memory.tagData)
