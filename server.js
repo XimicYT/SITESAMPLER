@@ -128,6 +128,7 @@ async function startSpider(targetCount = 150) {
 
     crawlLogs.push("Crawling finished! Applying Cross-Pollination Filtering...");
 
+    // A tag MUST appear on at least 5% of the unique domains we visited
     const threshold = Math.max(2, Math.floor(successfulSites * 0.05)); 
     
     const universalTags = Object.keys(tagData)
@@ -137,7 +138,14 @@ async function startSpider(targetCount = 150) {
             sites: tagData[tag].sitesAppearedOn 
         }))
         .filter(item => item.sites >= threshold) 
-        .sort((a, b) => b.count - a.count)
+        // --- YOUR NEW SORTING LOGIC ---
+        .sort((a, b) => {
+            if (b.sites !== a.sites) {
+                return b.sites - a.sites; // Primary Sort: Rank by most unique domains
+            }
+            return b.count - a.count;     // Secondary Sort: Use total occurrences only as a tie-breaker
+        })
+        // ------------------------------
         .slice(0, 253);
 
     const dictionary = {};
